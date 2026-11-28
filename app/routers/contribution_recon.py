@@ -80,9 +80,10 @@ from app.services.engine.rental_cost import (
 from app.services.engine.schema import (
     PER_PYEONG_TO_PER_M2, ProjectType, UnitMix, OwnerInput, ProjectParams,
 )
-from app.services.engine.zone import SIGUNGU_NAME, sigungu_code
+from app.services.engine.zone import SIGUNGU_NAME, land_contribution_for, sigungu_code
 from app.services.predict import trend
 from app.services.predict.construction_cost import contract_excess_rate, load_index
+from app.services.predict.forecast_band import BASIS as FORECAST_BAND_BASIS, band as forecast_band
 from app.services.predict.sale_price import escalate as escalate_sale
 from dataclasses import asdict
 from datetime import datetime
@@ -139,6 +140,21 @@ async def get_recon_contribution(req: ContributionRequest, request: Request, ses
 
     try:
         sliders = dict(req.sliders)
+
+        #용적률 직접 입력 : 노드가 아닌 값도 계산한다. 그 용적률까지 필요한 공공기여율을 노드를 만들 때와 같은 식으로 다시 구한다
+        #  far_allowed(/zone 의 sliders.floor_area_ratio.allowed)가 오면 요청의 public_contribution_ratio 대신 이 값을 쓴다
+        #  노드 값을 그대로 넣으면 /zone 이 내려 준 contributions 와 같은 값이 나온다
+        if req.far_allowed:
+            #  /zone 의 contributions 가 소수 넷째 자리까지라 같은 자리로 맞춘다
+            req.public_contribution_ratio = round(min(
+                max(
+                    land_contribution_for(
+                        float(sliders.get("floor_area_ratio") or 0.0), req.far_allowed, req.far_base, req.far_allowed_base,
+                    ),
+                    req.min_contribution_ratio or 0.0,
+                ),
+                0.6,
+            ), 4)
 
         #감정평가 보정률은 ProjectParams 의 필드가 아니라 종전자산 환산에만 쓴다.
         #슬라이더에서 뺐으므로 평소에는 ENGINE_DEFAULTS 의 고정값(1.527)이 쓰인다
@@ -646,6 +662,35 @@ async def get_recon_contribution(req: ContributionRequest, request: Request, ses
                 f"확정 이후 공사비 증액·분양 시점 차이로 권리가액이 종전자산의 {abs(mgmt_rate - final_rate):.0f}%만큼 {change} 돌아옵니다."
             )
 
+        #준공 정산 범위 : 관리처분 이후의 일반분양가 · 공사비 예측이 과거 오차만큼 빗나간 경우 (④ 를 네 번 더 계산)
+        #  분양가만 빗나간 경우와 공사비만 빗나간 경우를 따로 낸다 — 둘이 동시에 나쁜 쪽으로 빗나가는 구석 경우는 만들지 않는다
+        #  분양가는 관리처분 → 착공, 공사비는 관리처분 → 기성 기간(착공 ~ 준공) 한가운데까지의 기간으로 폭을 정한다
+        #  관리처분 확정값(①)과 조합원분양가는 그대로 두고, 그 뒤에 달라지는 몫만 흔든다
+        range_years = {"sale": start_years - mgmt_years, "cost": (start_years + complete_years) / 2 - mgmt_years}
+        settlement_range = {"basis": FORECAST_BAND_BASIS}
+        for range_kind in ("sale", "cost"):
+            range_band = forecast_band(range_kind, range_years[range_kind])
+            range_entry = {"band": round(range_band, 4), "years": round(range_years[range_kind], 2)}
+
+            #유리한 쪽 = 분양가는 높게 · 공사비는 낮게
+            for range_key, range_sign in (("favorable", 1), ("unfavorable", -1)):
+                range_sale = sale_start * (1 + range_sign * range_band) if range_kind == "sale" else sale_start
+                range_escalation = escalation_total * (1 - range_sign * range_band) if range_kind == "cost" else escalation_total
+                range_params = build_params(
+                    range_sale, sale_mgmt / range_sale if range_sale else 1.0, start_years, range_escalation, complete_years,
+                )
+                range_alloc = calc_allocation(range_params, calc_area(range_params))
+                range_units = calc_contribution_all(range_params, range_alloc, owner)
+                range_selected = next((u for u in range_units if u.name == owner.desired_unit), range_units[0])
+                range_entry[range_key] = {
+                    "general_price_start_per_m2": round(range_sale, 2),
+                    "cost_final_per_pyeong": round(cost_contract * range_escalation, 1),
+                    "proportional_rate": round(calc_project(range_params, range_alloc).proportional_rate, 2),
+                    "contribution": round(range_selected.contribution, 1),
+                    "unit_contributions": {u.name: round(u.contribution, 1) for u in range_units},
+                }
+            settlement_range[range_kind] = range_entry
+
         #재건축 안내 : 종전자산을 잡은 방법과 주택규모별 건설비율
         project_warnings = []
         if recon_prior is not None:
@@ -735,6 +780,7 @@ async def get_recon_contribution(req: ContributionRequest, request: Request, ses
             "excess_basis": excess.basis,
             "excess_case_count": excess.case_count,
             "excess_span": excess.span,
+            "settlement_range": settlement_range,
             #분양가 (만원/㎡) : 조합원분양가는 고시일 일반분양가 × 비율로 확정된다
             "general_price_mgmt_per_m2": round(sale_mgmt, 2),
             "general_price_start_per_m2": round(sale_start, 2),

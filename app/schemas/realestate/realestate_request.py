@@ -90,6 +90,15 @@ class ContributionRequest(BaseModel):
         description="종상향 최소 공공기여(순부담, 원래 대지 대비). /zone 응답 sliders.floor_area_ratio.min_contribution 을 넘긴다. "
                     "토지가 아닌 방식에서 순부담 하한을 맞추는 데 쓴다",
     )
+    far_allowed: Optional[float] = Field(
+        None, gt=0, le=2000,
+        description="허용용적률(%). /zone 응답 sliders.floor_area_ratio.allowed 를 그대로 넘긴다. 주면 용적률에 필요한 공공기여율을 "
+                    "서버가 다시 계산해 public_contribution_ratio 대신 쓴다 — 용적률을 노드가 아닌 값으로 직접 입력할 때 필요하다",
+    )
+    far_allowed_base: Optional[float] = Field(
+        None, gt=0, le=2000,
+        description="보정계수를 곱하기 전 허용용적률(%). /zone 응답 sliders.floor_area_ratio.allowed_base 를 그대로 넘긴다 (far_allowed 와 함께)",
+    )
     household_count: Optional[int] = Field(None, description="구역 세대수. 조합원 수 슬라이더 범위를 다시 계산하는 데 쓴다. 없으면 member_count 를 기준으로 한다")
     land_value_total: Optional[float] = Field(None, description="선택 구역 공시지가 총액(만원). ZoneSummary.land_value_total 을 그대로 넘긴다")
     sliders: dict = Field(..., description="프론트엔드 슬라이더 조정값 딕셔너리")
