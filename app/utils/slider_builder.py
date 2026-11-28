@@ -42,6 +42,10 @@ def _far_slider(plan: FarPlan) -> dict:
         "tiers": [n.label for n in plan.nodes],
         "contributions": [round(n.contribution, 4) for n in plan.nodes],
         "min_contribution": round(plan.min_contribution, 4),
+
+        #직접 입력용 : min ~ max 안의 값이면 노드가 아니어도 계산한다. 화면은 이 둘을 요청의 far_allowed · far_allowed_base 로 돌려보낸다
+        "allowed": plan.allowed,
+        "allowed_base": plan.allowed_base,
     }
 
 
